@@ -2,7 +2,7 @@ import java.io.{FileInputStream, PrintWriter}
 import java.util
 import java.util.{Date, Properties}
 
-import com.vividsolutions.jts.geom.Geometry
+import com.vividsolutions.jts.geom.{Envelope, Geometry}
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.api.java.JavaPairRDD
 import org.apache.spark.serializer.KryoSerializer
@@ -44,8 +44,8 @@ object Colocation extends App {
     val pointIndexType = IndexType.RTREE
     val fromTime = prop.getProperty("fromTime")
     val toTime = prop.getProperty("toTime")
-    val start = DateTime.parse(fromTime,DateTimeFormat.forPattern("yyyy-MM-dd HH:mm:ss"))
-    val end = DateTime.parse(toTime,DateTimeFormat.forPattern("yyyy-MM-dd HH:mm:ss"))
+    val start = DateTime.parse(fromTime, DateTimeFormat.forPattern("yyyy-MM-dd HH:mm:ss"))
+    val end = DateTime.parse(toTime, DateTimeFormat.forPattern("yyyy-MM-dd HH:mm:ss"))
 
 
     ConfFile = new FileInputStream(configPath + "colo.poi.properties")
@@ -159,34 +159,33 @@ object Colocation extends App {
     def elementsInPartition(filename: String): Unit = {
         val spatialDf = sparkSession.read.format("csv").option("delimiter", ",").option("header", "True").load(filename)
         spatialDf.createOrReplaceTempView("spatialDf")
-//        var points = new SpatialRDD[Geometry]
-        val temp = sparkSession.sql(s"select ST_Point(cast(spatialDf.lat as Decimal(24, 14)), cast(spatialDf.lng as Decimal(24, 14))) as point from spatialDf WHERE sysTime > UNIX_TIMESTAMP('$fromTime') * 1000 AND sysTime < UNIX_TIMESTAMP('$toTime') * 1000")
-        val points = Adapter.toSpatialRdd(temp,"point")
-        points.analyze()
-        points.spatialPartitioning(GridType.EQUALGRID, pointNumPartitions)
-//        points.buildIndex(IndexType.QUADTREE, false)
-        val pw = new PrintWriter(outputPath + "/partitions")
-        val z = points.getPartitioner.getGrids.toArray()
-        val test = sparkSession.sparkContext.parallelize(z).map(_.toString).zipWithIndex().map{case (k,v) => (v,k)}
-//
-//        val a = test.collect()
-
-        for (i <- z) {
-            pw.write(i.toString + "\n")
+        //        var points = new SpatialRDD[Geometry]
+        var current = start
+        while (end.getMillis - current.getMillis > 0) {
+            //        for (i <- 0 until Days.daysBetween(start, end).getDays) {
+            val plusOne = current.plusHours(1)
+            //            val temp = sparkSession.sql(s"select ST_Point(cast(lat as Decimal(24, 14)), cast(lng as Decimal(24, 14))) as point from spatialDf WHERE sysTime > UNIX_TIMESTAMP('$fromTime') * 1000 AND sysTime < UNIX_TIMESTAMP('$toTime') * 1000")
+            val temp = sparkSession.sql(s"select ST_Point(cast(lat as Decimal(24, 14)), cast(lng as Decimal(24, 14))) as point from spatialDf WHERE sysTime > UNIX_TIMESTAMP('${current.toLocalDateTime.toString(DateTimeFormat.forPattern("yyyy-MM-dd HH"))}', 'yyyy-MM-dd HH') * 1000 AND sysTime < UNIX_TIMESTAMP('${plusOne.toLocalDateTime.toString(DateTimeFormat.forPattern("yyyy-MM-dd HH"))}', 'yyyy-MM-dd HH') * 1000")
+            if (!temp.head(1).isEmpty) {
+                val points = Adapter.toSpatialRdd(temp, "point")
+                points.analyze()
+                points.boundaryEnvelope = new Envelope(39.59634, 40.3898263, 115.8528796421, 116.94819)
+                points.spatialPartitioning(GridType.EQUALGRID, pointNumPartitions)
+                val z = points.getPartitioner.getGrids.toArray()
+                val test = sparkSession.sparkContext.parallelize(z).map(_.toString).zipWithIndex().map { case (k, v) => (v, k) }
+                val x = points
+                  .spatialPartitionedRDD
+                  .rdd
+                  .mapPartitionsWithIndex { case (i, rows) => Iterator((i, rows.size)) }
+                //          .toDf("partition_number","number_of_records")
+                //          .show()
+                val temp1 = sparkSession.createDataFrame(test).toDF("partition_number", "env").as("env")
+                val temp2 = sparkSession.createDataFrame(x).toDF("partition_number", "number_of_records").as("record") //
+                val res = temp1.join(temp2, col("env.partition_number") === col("record.partition_number"), "inner").select("env", "number_of_records")
+                res.write.mode("overwrite").csv(outputPath + "/" + current.toLocalDateTime.toString(DateTimeFormat.forPattern("yyyy-MM-dd HH")))
+            }
+            current = current.plusHours(1)
         }
-        pw.close()
-        val x = points
-          .spatialPartitionedRDD
-          .rdd
-          .mapPartitionsWithIndex { case (i, rows) => Iterator((i, rows.size)) }
-        //          .toDf("partition_number","number_of_records")
-        //          .show()
-        val temp1 = sparkSession.createDataFrame(test).toDF("partition_number", "env").as("env")
-        temp1.show()
-        val temp2 = sparkSession.createDataFrame(x).toDF("partition_number", "number_of_records").as("record")//.write.mode("overwrite").csv(outputPath + "/numbers")
-        temp2.show()
-        val res = temp1.join(temp2,col("env.partition_number")===col("record.partition_number"),"inner").select("env","number_of_records")
-        res.show()
     }
 
 
