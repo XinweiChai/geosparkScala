@@ -20,8 +20,8 @@ object Plot extends App {
     Logger.getLogger("akka").setLevel(Level.WARN)
     val sparkSession = SparkSession.builder().config("spark.serializer", classOf[KryoSerializer].getName)
       .config("spark.kryo.registrator", classOf[GeoSparkVizKryoRegistrator].getName)
-//      .config("spark.debug.maxToStringFields", "100")
-      .master("local[*]")
+      //      .config("spark.debug.maxToStringFields", "100")
+//      .master("local[*]")
       .appName("Plot").getOrCreate()
     GeoSparkSQLRegistrator.registerAll(sparkSession)
     //    val sparkConf = new SparkConf().setAppName("Plot")
@@ -82,7 +82,7 @@ object Plot extends App {
     }
 
 
-    def using[A <: {def close() : Unit}, B](resource: A)(f: A => B): B =
+    def using[A <: {def close(): Unit}, B](resource: A)(f: A => B): B =
         try {
             f(resource)
         } finally {
@@ -98,7 +98,7 @@ object Plot extends App {
 
 
     def parallelRenderPointsBigData(): Unit = {
-        val spatialRDD = Colocation.readWithDF(pointInputLocation, pointLonOffset, pointLatOffset,sparkSession,epsg3857)
+        val spatialRDD = Colocation.readWithDF(pointInputLocation, pointLonOffset, pointLatOffset, sparkSession, epsg3857, gcjToWGS = true)
         if (cache) {
             spatialRDD.rawSpatialRDD.cache()
         }
@@ -125,10 +125,10 @@ object Plot extends App {
                 val scaleY = tb._2._y - tb._1._y + 1
                 val visualizationOperator = new HeatMap(256 * scaleX, 256 * scaleY, BeijingBoundary, false, 1, scaleX, scaleY, true, true)
                 // If blurRadius is set above 0, outOfBoundary problem will arise
-//                var maxPixelCount = pow(2, 17 - zoom)
-//                if (maxPixelCount < 10.0) {
-                  val  maxPixelCount = 2.0
-//                }
+                //                var maxPixelCount = pow(2, 17 - zoom)
+                //                if (maxPixelCount < 10.0) {
+                val maxPixelCount = 2.0
+                //                }
                 visualizationOperator.setMaxPixelCount(maxPixelCount)
                 visualizationOperator.Visualize(sparkContext, spatialRDD)
                 val imageGenerator = new ImageGenerator
@@ -168,7 +168,7 @@ object Plot extends App {
                 val boundary = bound3857(Mercator(x1, y1, zoom), Mercator(x2, y2, zoom))
                 val BeijingBoundary = new Envelope(boundary._1.x, boundary._2.x, boundary._1.y, boundary._2.y)
                 val tb = (Mercator(x1, y1, zoom).toTile, Mercator(x2, y2, zoom).toTile)
-            println(zoom + " " + BeijingBoundary + " " + tb)
+                println(zoom + " " + BeijingBoundary + " " + tb)
                 val scaleX = tb._2._x - tb._1._x + 1
                 val scaleY = tb._2._y - tb._1._y + 1
                 val visualizationOperator = new ScatterPlot(256 * scaleX, 256 * scaleY, BeijingBoundary, false, scaleX, scaleY, true)

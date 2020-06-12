@@ -18,13 +18,16 @@ import org.datasyslab.geosparkviz.core.Serde.GeoSparkVizKryoRegistrator
 import org.joda.time.format.DateTimeFormat
 import org.joda.time.{DateTime, Days}
 
+import scala.math._
+
+
 object Colocation extends App {
     Logger.getLogger("org").setLevel(Level.WARN)
     Logger.getLogger("akka").setLevel(Level.WARN)
 
     val sparkSession: SparkSession = SparkSession.builder().config("spark.serializer", classOf[KryoSerializer].getName)
       .config("spark.kryo.registrator", classOf[GeoSparkVizKryoRegistrator].getName)
-      .master("local[*]")
+//      .master("local[*]")
       .appName("Colocation").getOrCreate()
     GeoSparkSQLRegistrator.registerAll(sparkSession)
 
@@ -84,8 +87,8 @@ object Colocation extends App {
 
     println("output: " + outputPath)
 
-    //    filter(pointInputLocation)
 
+    //    filter(pointInputLocation)
     analysis match {
         case "distanceJoin" =>
             println("task: distanceJoin")
@@ -144,9 +147,81 @@ object Colocation extends App {
     println("Tasks finished")
     sparkSession.close()
 
-    def readWithDF(filename: String, lonOffset: Int, latOffset: Int, sparkSession: SparkSession, epsg3857: Boolean): SpatialRDD[Geometry] = {
-        val spatialDf = sparkSession.read.format("csv").option("delimiter", ",").option("header", "true").load(filename)
+
+    def transformLat(x: Double, y: Double): Double = {
+        var ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * sqrt(abs(x))
+        ret += (20.0 * sin(6.0 * x * Pi) + 20.0 * sin(2.0 * x * Pi)) * 2.0 / 3.0
+        ret += (20.0 * sin(y * Pi) + 40.0 * sin(y / 3.0 * Pi)) * 2.0 / 3.0
+        ret += (160.0 * sin(y / 12.0 * Pi) + 320 * sin(y * Pi / 30.0)) * 2.0 / 3.0
+        ret
+    }
+
+    def transformLon(x: Double, y: Double): Double = {
+        var ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * sqrt(abs(x))
+        ret += (20.0 * sin(6.0 * x * Pi) + 20.0 * sin(2.0 * x * Pi)) * 2.0 / 3.0
+        ret += (20.0 * sin(x * Pi) + 40.0 * sin(x / 3.0 * Pi)) * 2.0 / 3.0
+        ret += (150.0 * sin(x / 12.0 * Pi) + 300.0 * sin(x / 30.0 * Pi)) * 2.0 / 3.0
+        ret
+    }
+
+    def deltaLonLat(wgLon: Double, wgLat: Double, offset: Array[Double]): (Double, Double, Array[Double]) = {
+        val AXIS = 6378245.0
+        val OFFSET = 0.00669342162296594323
+        var dLat = transformLat(wgLon - 105.0, wgLat - 35.0)
+        var dLon = transformLon(wgLon - 105.0, wgLat - 35.0)
+        val radLat = wgLat / 180.0 * Pi
+        var magic = sin(radLat)
+        magic = 1 - OFFSET * magic * magic
+        val sqrtMagic = sqrt(magic)
+        dLat = (dLat * 180.0) / ((AXIS * (1 - OFFSET)) / (magic * sqrtMagic) * Pi)
+        dLon = (dLon * 180.0) / (AXIS / sqrtMagic * cos(radLat) * Pi)
+        offset(1) = dLat
+        offset(0) = dLon
+        (wgLon, wgLat, offset)
+    }
+
+
+    def gcjToWGS84(gcjLon: Double, gcjLat: Double): (Double, Double) = {
+        var wgLon = gcjLon
+        var wgLat = gcjLat
+        var deltaD = Array(0.0, 0.0)
+        var deltalon = 1.0
+        var deltalat = 1.0
+        var itcnt = 0
+        while ((deltalat > 1e-7 || deltalon > 1e-7) && (itcnt <= 5)) {
+            val temp = deltaLonLat(wgLon, wgLat, deltaD)
+            wgLon = temp._1
+            wgLat = temp._2
+            deltaD = temp._3
+            if (itcnt == 0) {
+                deltalon = abs(wgLon)
+                deltalat = abs(wgLat)
+            }
+            else {
+                deltalon = abs(gcjLon - deltaD(0) - wgLon)
+                deltalat = abs(gcjLat - deltaD(1) - wgLat)
+            }
+            wgLon = gcjLon - deltaD(0)
+            wgLat = gcjLat - deltaD(1)
+            itcnt += 1
+        }
+        (wgLon, wgLat)
+    }
+
+    def readWithDF(filename: String, lonOffset: Int, latOffset: Int, sparkSession: SparkSession, epsg3857: Boolean, gcjToWGS: Boolean = false): SpatialRDD[Geometry] = {
+        var spatialDf = sparkSession.read.format("csv").option("delimiter", ",").option("header", "true").load(filename)
         spatialDf.createOrReplaceTempView("spatialDf")
+        spatialDf.show()
+        if (gcjToWGS) {
+            //        def transLon = udf[Double, Double, Double]((x: Double, y: Double) => gcjToWGS84(x, y)._1)
+            //        def transLat = udf[Double, Double, Double]((x: Double, y: Double) => gcjToWGS84(x, y)._2)
+            sparkSession.udf.register("transLon", (x: Double, y: Double) => gcjToWGS84(x, y)._1)
+            sparkSession.udf.register("transLat", (x: Double, y: Double) => gcjToWGS84(x, y)._2)
+            //        spatialDf.withColumn("new_lng", transLon(spatialDf("lng"), spatialDf("lat")))
+            //        spatialDf.withColumn("new_lat", transLat(spatialDf("lat"), spatialDf("lat")))
+            spatialDf = sparkSession.sql("SELECT transLon(lng, lat) as lng, transLat(lng, lat) as lat FROM spatialDf")
+            spatialDf.createOrReplaceTempView("spatialDf")
+        }
         val temp = sparkSession.sql(s"select ST_Point(cast(spatialDf.lat as Decimal(24, 14)), cast(spatialDf.lng as Decimal(24, 14))) as point from spatialDf")
         val points = Adapter.toSpatialRdd(temp, "point")
         if (epsg3857) {
