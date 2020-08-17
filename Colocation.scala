@@ -27,7 +27,7 @@ object Colocation extends App {
 
     val sparkSession: SparkSession = SparkSession.builder().config("spark.serializer", classOf[KryoSerializer].getName)
       .config("spark.kryo.registrator", classOf[GeoSparkVizKryoRegistrator].getName)
-//      .master("local[*]")
+      .master("local[*]")
       .appName("Colocation").getOrCreate()
     GeoSparkSQLRegistrator.registerAll(sparkSession)
 
@@ -143,6 +143,11 @@ object Colocation extends App {
             println("point input: " + pointInputLocation)
             println("task: elementsInPartition")
             elementsInPartition(pointInputLocation)
+        case "joinLabeled" =>
+            println("point input: " + pointInputLocation)
+            println("poi input: " + poiInputLocation)
+            println("task: joinLabeled")
+            joinLabeled()
     }
     println("Tasks finished")
     sparkSession.close()
@@ -507,5 +512,21 @@ object Colocation extends App {
         spatialDf
     }
 
-
+    def joinLabeled(): Unit = {
+        val poiRDD = ShapefileReader.readToGeometryRDD(sparkSession.sparkContext, poiInputLocation)
+        var poiDf = Adapter.toDf(poiRDD, sparkSession)
+        poiDf.createOrReplaceTempView("poiDf")
+        poiDf = sparkSession.sql("SELECT ST_GeomFromWKT(geometry) AS geom FROM poiDf")
+        poiDf.createOrReplaceTempView("poiDf")
+        var pointDf = sparkSession.read.format("csv").option("delimiter", ",").option("header", "True").load(pointInputLocation)
+        pointDf.createOrReplaceTempView("pointDf")
+        pointDf = sparkSession.sql(
+            "SELECT sysTime, ST_Transform(ST_Point(cast(lng AS Decimal(24, 14)), cast(lat AS Decimal(24, 14))), 'epsg:4326', 'epsg:3857') AS point"
+              + ", from_unixtime(sysTime/1000,'yyyy-MM-dd') AS date, from_unixtime(sysTime/1000,'HH:mm:ss') AS time FROM pointDf"
+              + s" WHERE sysTime > UNIX_TIMESTAMP('${fromTime}','yyyy-MM-dd') * 1000 AND sysTime < UNIX_TIMESTAMP('${toTime}','yyyy-MM-dd') * 1000")
+        pointDf.createOrReplaceTempView("pointDf")
+        val distJoin = sparkSession.sql(
+            "SELECT date, COUNT(*) as Join_Count FROM pointDf, poiDf WHERE HOUR(time)=8 AND ST_Within(point, geom) GROUP BY date ORDER BY date")
+        distJoin.write.option("header", "True").mode("overwrite").csv(outputPath)
+    }
 }
